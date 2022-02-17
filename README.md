@@ -11,4 +11,5 @@
     secretKey=xxx
     bucketName=xxx
     ```
-
+## 注意
+腾讯云中的存储桶直接存放Mod文件夹  不要用mods作为根目录
