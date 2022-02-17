@@ -5,7 +5,7 @@
     ```Java
     java -jar ProjectZomboid_Mods_Install_Java-0.0.1.jar secretId secretKey bucketName
     ```
-2. 使用properties
+2. 同Jar路径下使用key.properties
     ```properties
     secretId=xxx
     secretKey=xxx
