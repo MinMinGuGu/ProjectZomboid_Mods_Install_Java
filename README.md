@@ -1,5 +1,5 @@
 # ProjectZomboid_Mods_Install_Java
-基于腾讯云的对象存储编写的ProjectZomboid在线更新程序
+基于腾讯云的对象存储编写的ProjectZomboid在线更新Mod程序
 ## 运行
 1. 使用启动参数
     ```Java
