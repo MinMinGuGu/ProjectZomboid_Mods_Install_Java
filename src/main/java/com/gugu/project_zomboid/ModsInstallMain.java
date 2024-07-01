@@ -44,7 +44,7 @@ public class ModsInstallMain {
 
     private static final String LOCAL_MOD_PATH = Paths.get(System.getProperties().getProperty("user.home"), "Zomboid", "mods").toString();
 
-    private static final ExecutorService executorService = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() - 1);
+    private static final ExecutorService fileExecutorService = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() - 1);
 
     private static final String KEY_FILE_NAME = "key.properties";
 
@@ -146,6 +146,14 @@ public class ModsInstallMain {
         }
     }
 
+    private static boolean isDir(String name) {
+        String pass = name;
+        if (pass.contains("/")) {
+            pass = pass.substring(pass.lastIndexOf("/") + 1);
+        }
+        return !pass.contains(".");
+    }
+
     private static void updateLocalMod(COSClient cosClient, List<String> updateModList) {
         Path mods_md5_info_path = Paths.get(LOCAL_MOD_PATH, "mods_md5_info.json");
         cosClient.getObject(new GetObjectRequest(bucketName, "mods_md5_info.json"), mods_md5_info_path.toFile());
@@ -154,20 +162,22 @@ public class ModsInstallMain {
         List<Future<?>> futureList = new LinkedList<>();
         for (String modName : updateModList) {
             Path filePath = Paths.get(LOCAL_MOD_PATH, modName);
-            if (Files.isDirectory(filePath)) {
-                try {
-                    Files.createDirectories(filePath);
-                    continue;
-                } catch (IOException e) {
-                    System.err.println("创建本地文件出现错误");
-                    throw new RuntimeException(e);
-                }
-            }
             if (isIgnore(filePath)) {
                 ignoreCount++;
                 continue;
             }
-            Future<?> future = executorService.submit(() -> {
+            if (isDir(modName)) {
+                if (Files.notExists(filePath)) {
+                    try {
+                        Files.createDirectories(filePath);
+                    } catch (IOException e) {
+                        System.err.println("创建本地文件出现错误");
+                        throw new RuntimeException(e);
+                    }
+                }
+                continue;
+            }
+            Future<?> future = fileExecutorService.submit(() -> {
                 if (Files.exists(filePath)) {
                     String key = getKey(filePath);
                     String fileMD5 = mods_md5_map.getOrDefault(key, "");
@@ -200,8 +210,8 @@ public class ModsInstallMain {
                 }
             }
             consoleProgressBarHelper.stop();
-            executorService.shutdown();
-            while (!executorService.isTerminated()) {
+            fileExecutorService.shutdown();
+            while (!fileExecutorService.isTerminated()) {
                 Thread.yield();
             }
         }
