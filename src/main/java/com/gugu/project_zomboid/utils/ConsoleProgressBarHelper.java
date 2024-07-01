@@ -18,7 +18,7 @@ import java.util.concurrent.TimeUnit;
 public class ConsoleProgressBarHelper {
     private static final String DEFAULT_TEMPLATE = "%s: %s%% [%s]";
     private final String title;
-    private volatile Integer currCount;
+    private volatile Long currCount;
     private final Float maxCount;
     private final Long refresh;
     private final Integer progressBarLength;
@@ -37,7 +37,7 @@ public class ConsoleProgressBarHelper {
      * @param title the title
      */
     public ConsoleProgressBarHelper(String title) {
-        this(title, 0, 100.0F);
+        this(title, 0L, 100.0F);
     }
 
     /**
@@ -47,7 +47,7 @@ public class ConsoleProgressBarHelper {
      * @param currCount the curr count
      * @param maxCount  the max count
      */
-    public ConsoleProgressBarHelper(String title, Integer currCount, Float maxCount) {
+    public ConsoleProgressBarHelper(String title, Long currCount, Float maxCount) {
         this(title, currCount, maxCount, 10L, 50);
     }
 
@@ -60,7 +60,7 @@ public class ConsoleProgressBarHelper {
      * @param refresh           the refresh
      * @param progressBarLength the progress bar length
      */
-    public ConsoleProgressBarHelper(String title, Integer currCount, Float maxCount, Long refresh, Integer progressBarLength) {
+    public ConsoleProgressBarHelper(String title, Long currCount, Float maxCount, Long refresh, Integer progressBarLength) {
         this.title = title;
         this.currCount = currCount;
         this.maxCount = maxCount;
@@ -100,18 +100,18 @@ public class ConsoleProgressBarHelper {
     }
 
     private String getPrintStr() {
-        int percentage = getPercentage();
+        long percentage = getPercentage();
         String progressBarStr = getProgressBarStr(percentage);
         return String.format(DEFAULT_TEMPLATE, title, percentage, progressBarStr);
     }
 
-    private int getPercentage() {
-        return (int) ((currCount / maxCount) * 100);
+    private long getPercentage() {
+        return (long) ((currCount / maxCount) * 100);
     }
 
-    private String getProgressBarStr(int percentage) {
+    private String getProgressBarStr(long percentage) {
         StringBuilder result = new StringBuilder();
-        int printCount = (int)((percentage / 100.0) * progressBarLength);
+        long printCount = (long) ((percentage / 100.0) * progressBarLength);
         for (int i = 0; i < printCount; i++) {
             result.append("█");
         }

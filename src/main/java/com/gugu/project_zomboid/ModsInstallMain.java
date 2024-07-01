@@ -11,7 +11,9 @@ import com.qcloud.cos.model.COSObjectSummary;
 import com.qcloud.cos.model.GetObjectRequest;
 import com.qcloud.cos.model.ListObjectsRequest;
 import com.qcloud.cos.model.ObjectListing;
+import com.qcloud.cos.model.ObjectMetadata;
 import com.qcloud.cos.region.Region;
+import com.qcloud.cos.utils.CRC64;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -23,13 +25,11 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.stream.Collectors;
 
 /**
  * The type Main.
@@ -41,13 +41,15 @@ public class ModsInstallMain {
 
     private static final String LOCAL_MOD_PATH = Paths.get(System.getProperties().getProperty("user.home"), "Zomboid", "mods").toString();
 
+    private static final ExecutorService executorService = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() - 1);
+
     private static final String KEY_FILE_NAME = "key.properties";
 
-    private static String secretId;
+    private static String secretId = "";
 
-    private static String secretKey;
+    private static String secretKey = "";
 
-    private static String bucketName;
+    private static String bucketName = "";
 
     /**
      * The entry point of application.
@@ -61,19 +63,15 @@ public class ModsInstallMain {
         COSClient cosClient = getCosClient();
         System.out.println("服务器连接成功...正在检查Mod更新...");
         List<String> serverFileList = getServerFileList(cosClient);
-        List<String> localFileList = getLocalFileList();
-        List<String> updateFileList = getUpdateModList(serverFileList, localFileList);
-        if (updateFileList.isEmpty()) {
-            System.out.println("检查Mod更新完成...");
-            System.out.print("按任意键退出程序...");
-            System.in.read();
-            return;
-        }
-        System.out.println("预计更新" + updateFileList.size() + "个文件");
-        updateLocalMod(cosClient, updateFileList);
+        updateLocalMod(cosClient, serverFileList);
+        endRun();
+    }
+
+    private static void endRun() throws IOException {
         System.out.println("检查Mod更新完成...");
-        System.out.print("按任意键退出程序...");
+        System.out.print("按回车键退出程序...");
         System.in.read();
+        System.exit(0);
     }
 
     private static void readData(String[] args) {
@@ -81,6 +79,9 @@ public class ModsInstallMain {
             secretId = args[0];
             secretKey = args[1];
             bucketName = args[2];
+            return;
+        }
+        if (!secretId.isEmpty() && !secretKey.isEmpty() && !bucketName.isEmpty()) {
             return;
         }
         if (!readLocalFile()) {
@@ -92,7 +93,7 @@ public class ModsInstallMain {
 
         Path keyPath = Paths.get(System.getProperty("user.dir"), KEY_FILE_NAME);
         if (Files.exists(keyPath)) {
-            try(InputStreamReader inputStreamReader = new InputStreamReader(new FileInputStream(keyPath.toFile()), StandardCharsets.UTF_8)){
+            try (InputStreamReader inputStreamReader = new InputStreamReader(Files.newInputStream(keyPath.toFile().toPath()), StandardCharsets.UTF_8)) {
                 Properties properties = new Properties();
                 properties.load(inputStreamReader);
                 secretId = properties.getProperty("secretId");
@@ -107,73 +108,86 @@ public class ModsInstallMain {
         return false;
     }
 
+    private static String getCalculateCrc64(File localFile) throws IOException {
+        CRC64 crc64 = new CRC64();
+        try (FileInputStream stream = new FileInputStream(localFile)) {
+            byte[] b = new byte[1024 * 1024];
+            while (true) {
+                final int read = stream.read(b);
+                if (read <= 0) {
+                    break;
+                }
+                crc64.update(b, read);
+            }
+        }
+        return Long.toUnsignedString(crc64.getValue());
+    }
+
+
     private static void updateLocalMod(COSClient cosClient, List<String> updateModList) {
-        ExecutorService executorService = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() - 1);
         long ignoreCount = 0;
         List<Future<?>> futureList = new LinkedList<>();
         for (String modName : updateModList) {
             Path filePath = Paths.get(LOCAL_MOD_PATH, modName);
-            if (isDir(modName)) {
-                if (Files.notExists(filePath)) {
-                    try {
-                        Files.createDirectories(filePath);
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                        System.err.println("创建本地文件出现错误");
-                        throw new RuntimeException(e);
-                    }
+            if (Files.isDirectory(filePath)) {
+                try {
+                    Files.createDirectories(filePath);
+                    continue;
+                } catch (IOException e) {
+                    System.err.println("创建本地文件出现错误");
+                    throw new RuntimeException(e);
                 }
-                ignoreCount++;
-                continue;
             }
-            if (isIgnore(modName)) {
+            if (isIgnore(filePath)) {
                 ignoreCount++;
                 continue;
             }
             Future<?> future = executorService.submit(() -> {
+                if (Files.exists(filePath)) {
+                    ObjectMetadata objectMetadata = cosClient.getObjectMetadata(bucketName, modName);
+                    String serverCrc64Ecma = objectMetadata.getCrc64Ecma();
+                    try {
+                        String localCalculateCrc64 = getCalculateCrc64(filePath.toFile());
+                        if (serverCrc64Ecma.equals(localCalculateCrc64)) {
+                            return;
+                        }
+                    } catch (IOException ignore) {
+                    }
+                }
                 GetObjectRequest getObjectRequest = new GetObjectRequest(bucketName, modName);
                 cosClient.getObject(getObjectRequest, filePath.toFile());
             });
             futureList.add(future);
         }
         if (ignoreCount != 0) {
-            System.out.println("已忽略不重要的" + ignoreCount + "个文件");
+            System.out.println("已忽略非正常mod该有的" + ignoreCount + "个文件");
         }
         if (!futureList.isEmpty()) {
-            ConsoleProgressBarHelper consoleProgressBarHelper = new ConsoleProgressBarHelper("下载进度", 0, (float) futureList.size());
+            ConsoleProgressBarHelper consoleProgressBarHelper = new ConsoleProgressBarHelper("更新进度", 0L, (float) futureList.size());
             consoleProgressBarHelper.start();
             for (int i = 0; i < futureList.size(); i++) {
                 try {
                     futureList.get(i).get();
-                    consoleProgressBarHelper.setCurrCount(i + 1);
+                    consoleProgressBarHelper.setCurrCount((long) i);
                 } catch (InterruptedException | ExecutionException e) {
-                    e.printStackTrace();
                     System.err.println("下载文件时出现异常");
                     throw new RuntimeException(e);
                 }
             }
+            consoleProgressBarHelper.stop();
             executorService.shutdown();
             while (!executorService.isTerminated()) {
                 Thread.yield();
             }
-            consoleProgressBarHelper.stop();
         }
     }
 
-    private static boolean isIgnore(String fileName) {
-        String pass = fileName;
-        if (pass.contains("/")) {
-            pass = pass.substring(pass.lastIndexOf("/") + 1);
+    private static boolean isIgnore(Path filePath) {
+        String fileName = filePath.getFileName().toString();
+        if (fileName.contains("/")) {
+            fileName = fileName.substring(fileName.lastIndexOf("/") + 1);
         }
-        return pass.startsWith(".");
-    }
-
-    private static boolean isDir(String name) {
-        String pass = name;
-        if (pass.contains("/")) {
-            pass = pass.substring(pass.lastIndexOf("/") + 1);
-        }
-        return !pass.contains(".");
+        return fileName.startsWith(".");
     }
 
     private static List<String> getServerFileList(COSClient cosClient) {
@@ -186,7 +200,6 @@ public class ModsInstallMain {
             try {
                 objectListing = cosClient.listObjects(listObjectsRequest);
             } catch (CosClientException e) {
-                e.printStackTrace();
                 System.err.println("获取服务器Mod时发送错误");
                 throw new RuntimeException(e);
             }
@@ -207,46 +220,5 @@ public class ModsInstallMain {
         ClientConfig clientConfig = new ClientConfig(region);
         clientConfig.setHttpProtocol(HttpProtocol.https);
         return new COSClient(cosCredentials, clientConfig);
-    }
-
-    private static List<String> getUpdateModList(List<String> serverFileList, List<String> localModList) {
-        List<String> result = new LinkedList<>();
-        for (String fileName : serverFileList) {
-            if (localModList.contains(fileName)) {
-                continue;
-            }
-            result.add(fileName);
-        }
-        return result;
-    }
-
-    /**
-     * Gets local file list.
-     *
-     * @return the local file list
-     */
-    static List<String> getLocalFileList() {
-        File modsFile = new File(LOCAL_MOD_PATH);
-        if (!modsFile.exists()) {
-            System.err.println("无法找到目录 " + modsFile.getPath());
-            throw new RuntimeException("请至少运行过一次游戏，再使用在线更新");
-        }
-        List<String> result = new LinkedList<>();
-        searchLocalFileList(LOCAL_MOD_PATH, result);
-        return result.stream().filter(name -> !"".equals(name)).map(item -> item.replace("\\", "/")).collect(Collectors.toList());
-    }
-
-    private static void searchLocalFileList(String pathStr, List<String> result) {
-        Path path = Paths.get(pathStr);
-        if (Files.isDirectory(path)) {
-            for (File file : Objects.requireNonNull(path.toFile().listFiles())) {
-                if (Files.isDirectory(file.toPath())) {
-                    searchLocalFileList(file.getPath() + File.separator, result);
-                } else {
-                    searchLocalFileList(file.getPath(), result);
-                }
-            }
-        }
-        result.add(pathStr.replace(LOCAL_MOD_PATH + File.separator, ""));
     }
 }
