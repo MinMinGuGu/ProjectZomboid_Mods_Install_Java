@@ -1,5 +1,7 @@
 package com.gugu.project_zomboid;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gugu.project_zomboid.utils.ConsoleProgressBarHelper;
 import com.qcloud.cos.COSClient;
 import com.qcloud.cos.ClientConfig;
@@ -11,9 +13,7 @@ import com.qcloud.cos.model.COSObjectSummary;
 import com.qcloud.cos.model.GetObjectRequest;
 import com.qcloud.cos.model.ListObjectsRequest;
 import com.qcloud.cos.model.ObjectListing;
-import com.qcloud.cos.model.ObjectMetadata;
 import com.qcloud.cos.region.Region;
-import com.qcloud.cos.utils.CRC64;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -23,8 +23,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -61,7 +64,8 @@ public class ModsInstallMain {
         readData(args);
         System.out.println("正在连接服务器...");
         COSClient cosClient = getCosClient();
-        System.out.println("服务器连接成功...正在检查Mod更新...");
+        System.out.println("服务器连接成功...");
+        System.out.println("正在检查Mod更新...");
         List<String> serverFileList = getServerFileList(cosClient);
         updateLocalMod(cosClient, serverFileList);
         endRun();
@@ -108,23 +112,44 @@ public class ModsInstallMain {
         return false;
     }
 
-    private static String getCalculateCrc64(File localFile) throws IOException {
-        CRC64 crc64 = new CRC64();
-        try (FileInputStream stream = new FileInputStream(localFile)) {
-            byte[] b = new byte[1024 * 1024];
-            while (true) {
-                final int read = stream.read(b);
-                if (read <= 0) {
-                    break;
-                }
-                crc64.update(b, read);
-            }
+    private static Map<String, String> readJsonFileToMap(String filePath) {
+        ObjectMapper objectMapper = new ObjectMapper();
+        Map<String, String> map;
+        try {
+            map = objectMapper.readValue(new File(filePath), new TypeReference<Map<String, String>>() {
+            });
+        } catch (IOException e) {
+            throw new RuntimeException(e);
         }
-        return Long.toUnsignedString(crc64.getValue());
+        return map;
     }
 
+    private static String calculateMD5(String filePath) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            FileInputStream fis = new FileInputStream(filePath);
+            byte[] buffer = new byte[1024];
+            int bytesRead;
+            while ((bytesRead = fis.read(buffer)) != -1) {
+                md.update(buffer, 0, bytesRead);
+            }
+            fis.close();
+            byte[] mdBytes = md.digest();
+            StringBuilder hexString = new StringBuilder();
+            for (byte b : mdBytes) {
+                hexString.append(String.format("%02x", b));
+            }
+            return hexString.toString();
+        } catch (NoSuchAlgorithmException | IOException e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
 
     private static void updateLocalMod(COSClient cosClient, List<String> updateModList) {
+        Path mods_md5_info_path = Paths.get(LOCAL_MOD_PATH, "mods_md5_info.json");
+        cosClient.getObject(new GetObjectRequest(bucketName, "mods_md5_info.json"), mods_md5_info_path.toFile());
+        Map<String, String> mods_md5_map = readJsonFileToMap(mods_md5_info_path.toString());
         long ignoreCount = 0;
         List<Future<?>> futureList = new LinkedList<>();
         for (String modName : updateModList) {
@@ -144,14 +169,14 @@ public class ModsInstallMain {
             }
             Future<?> future = executorService.submit(() -> {
                 if (Files.exists(filePath)) {
-                    ObjectMetadata objectMetadata = cosClient.getObjectMetadata(bucketName, modName);
-                    String serverCrc64Ecma = objectMetadata.getCrc64Ecma();
-                    try {
-                        String localCalculateCrc64 = getCalculateCrc64(filePath.toFile());
-                        if (serverCrc64Ecma.equals(localCalculateCrc64)) {
-                            return;
-                        }
-                    } catch (IOException ignore) {
+                    String key = getKey(filePath);
+                    String fileMD5 = mods_md5_map.getOrDefault(key, "");
+                    if (fileMD5.isEmpty()) {
+                        return;
+                    }
+                    String local_file_md5 = calculateMD5(filePath.toString());
+                    if (fileMD5.equals(local_file_md5)) {
+                        return;
                     }
                 }
                 GetObjectRequest getObjectRequest = new GetObjectRequest(bucketName, modName);
@@ -168,7 +193,7 @@ public class ModsInstallMain {
             for (int i = 0; i < futureList.size(); i++) {
                 try {
                     futureList.get(i).get();
-                    consoleProgressBarHelper.setCurrCount((long) i);
+                    consoleProgressBarHelper.setCurrCount((long) i + 1);
                 } catch (InterruptedException | ExecutionException e) {
                     System.err.println("下载文件时出现异常");
                     throw new RuntimeException(e);
@@ -180,6 +205,14 @@ public class ModsInstallMain {
                 Thread.yield();
             }
         }
+    }
+
+    private static String getKey(Path filePath) {
+        String replace = filePath.toString().replace(LOCAL_MOD_PATH, "");
+        if (replace.startsWith("\\") || replace.startsWith("/")) {
+            replace = replace.substring(1);
+        }
+        return replace;
     }
 
     private static boolean isIgnore(Path filePath) {
